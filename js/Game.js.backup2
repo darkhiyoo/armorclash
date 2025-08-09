@@ -1,0 +1,808 @@
+class Game {
+    constructor() {
+        this.canvas = document.getElementById('gameCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        
+        // Game state
+        this.gameState = 'loading'; // loading, menu, playing, paused, gameOver
+        this.stage = 1;
+        this.isRunning = false;
+        this.lastFrameTime = 0;
+        this.deltaTime = 0;
+        
+        // Systems
+        this.assetLoader = new AssetLoader();
+        this.soundManager = new SoundManager();
+        this.gamepadManager = new GamepadManager();
+        this.inputSystem = new InputSystem(this.gamepadManager);
+        this.collisionSystem = new CollisionSystem();
+        this.renderSystem = new RenderSystem(this.canvas, this.assetLoader);
+        this.debugSystem = new DebugSystem(this.canvas);
+        
+        // Game entities
+        this.players = [];
+        this.enemies = [];
+        this.bullets = [];
+        this.walls = [];
+        this.cars = [];
+        this.powerUps = [];
+        
+        // Game settings
+        this.maxPlayers = 8;
+        this.activePlayerCount = 1;
+        this.enemySpawnTimer = 0;
+        this.enemySpawnDelay = 5000; // 5 seconds
+        this.maxEnemies = 3;
+        
+        // Score and lives
+        this.gameScore = 0;
+        this.gameTime = 0;
+        
+        // Level data
+        this.levelData = null;
+        
+        // Global reference
+        window.game = this;
+        
+        this.init();
+    }
+
+    async init() {
+        console.log('Initializing Wildfire Tank Battle...');
+        
+        // Set up loading callbacks
+        this.assetLoader.setLoadingCallbacks(
+            (loaded, total) => this.onLoadingProgress(loaded, total),
+            () => this.onLoadingComplete()
+        );
+        
+        // Load assets
+        await this.assetLoader.loadAssets();
+    }
+
+    onLoadingProgress(loaded, total) {
+        const progress = (loaded / total) * 100;
+        console.log(`Loading assets: ${Math.round(progress)}%`);
+        
+        // Update loading display
+        this.renderLoadingScreen(progress);
+    }
+
+    onLoadingComplete() {
+        console.log('Assets loaded successfully');
+        
+        // Set up sprites for entities
+        this.setupSprites();
+        
+        // Start the game
+        this.gameState = 'playing';
+        this.startGame();
+    }
+
+    setupSprites() {
+        // Player sprites will be set when players are created
+        // Background - use the city.png from stages folder
+        this.renderSystem.setBackground('stage_city');
+    }
+
+    startGame() {
+        console.log('Starting game...');
+        
+        // Create initial game state
+        this.resetGame();
+        
+        // Start game loop
+        this.isRunning = true;
+        this.lastFrameTime = performance.now();
+        this.gameLoop();
+    }
+
+    resetGame() {
+        // Clear existing entities
+        this.players = [];
+        this.enemies = [];
+        this.bullets = [];
+        this.walls = [];
+        this.cars = [];
+        this.powerUps = [];
+        
+        // Reset game state
+        this.gameScore = 0;
+        this.gameTime = 0;
+        this.stage = 1;
+        this.enemySpawnTimer = 0;
+        
+        // Create players
+        this.createPlayers();
+        
+        // Create initial level (no base needed)
+        this.createLevel();
+        
+        // Set up systems
+        this.setupSystems();
+        
+        // Update UI
+        this.updateUI();
+    }
+
+    createPlayers() {
+        // Move players inside the safe zone defined by diagonal wall (640,130) to (135,475)
+        // Safe spawn area: well within the diagonal boundary
+        
+        // Player positions - moved inside the safe zone
+        const playerPositions = [
+            { x: 200, y: 420 }, // Bottom left - safe inside diagonal
+            { x: 350, y: 420 }, // Bottom center left - safe inside
+            { x: 500, y: 420 }, // Bottom center right - safe inside  
+            { x: 580, y: 420 }, // Bottom right - safe inside diagonal
+            { x: 275, y: 350 }, // Second row left
+            { x: 425, y: 350 }, // Second row center
+            { x: 525, y: 350 }, // Second row right
+            { x: 600, y: 350 }  // Second row far right
+        ];
+        
+        for (let i = 0; i < this.activePlayerCount; i++) {
+            const pos = playerPositions[i] || playerPositions[0];
+            const player = new Player(pos.x, pos.y, i);
+            
+            // Set sprite
+            player.spriteName = player.spriteName || 'player1';
+            player.sprite = this.assetLoader.getImage(player.spriteName);
+            
+            this.players.push(player);
+            this.inputSystem.registerPlayer(player);
+            this.renderSystem.addEntity(player);
+            this.collisionSystem.addEntity(player);
+        }
+    }
+
+    createLevel() {
+        // Create boundary walls (black borders from your markers)
+        this.createWalls();
+        
+        // Create destructible cars
+        this.createCars();
+        
+        // Spawn enemies at green marker positions
+        this.spawnEnemiesAtMarkers();
+    }
+
+    spawnEnemiesAtMarkers() {
+        // Enemy spawn positions - now free to roam the full play area!
+        const enemySpawns = [
+            { x: 150, y: 150 },    // Top left area
+            { x: 400, y: 150 },    // Top center  
+            { x: 600, y: 150 },    // Top right area
+            { x: 150, y: 300 },    // Mid left
+            { x: 600, y: 300 },    // Mid right
+        ];
+        
+        // Spawn initial enemies
+        enemySpawns.slice(0, 3).forEach((spawn, index) => {
+            setTimeout(() => {
+                this.spawnEnemyAt(spawn.x, spawn.y);
+            }, index * 500); // Stagger spawning
+        });
+        
+        // Store remaining spawn points for later waves
+        this.enemySpawnPoints = enemySpawns;
+        this.currentSpawnIndex = 3;
+    }
+
+    spawnEnemyAt(x, y) {
+        const enemy = new Enemy(x, y);
+        enemy.spriteName = 'enemy1';
+        enemy.sprite = this.assetLoader.getImage(enemy.spriteName);
+        
+        this.enemies.push(enemy);
+        this.renderSystem.addEntity(enemy);
+        this.collisionSystem.addEntity(enemy);
+        
+        this.updateUI();
+    }
+
+    createWalls() {
+        // Create custom invisible boundary walls based on user's coordinates
+        // User traced: (110,102) -> (689,100) -> (690,500) -> (100,500) -> back to start
+        
+        const wallThickness = 8; // Thinner walls for precise boundary
+        
+        // Top wall: from (110,102) to (689,100)
+        const topWall = new Entity(110, 102 - wallThickness/2, 579, wallThickness); // width = 689-110 = 579
+        topWall.collisionLayer = 'wall';
+        topWall.collisionMask = ['tank', 'bullet'];
+        topWall.visible = false; // Make invisible
+        topWall.destructible = false;
+        this.walls.push(topWall);
+        
+        // Right wall: from (689,100) to (690,500) 
+        const rightWall = new Entity(689 - wallThickness/2, 100, wallThickness, 400); // height = 500-100 = 400
+        rightWall.collisionLayer = 'wall';
+        rightWall.collisionMask = ['tank', 'bullet'];
+        rightWall.visible = false; // Make invisible
+        rightWall.destructible = false;
+        this.walls.push(rightWall);
+        
+        // Bottom wall: from (690,500) to (100,500)
+        const bottomWall = new Entity(100, 500 - wallThickness/2, 590, wallThickness); // width = 690-100 = 590
+        bottomWall.collisionLayer = 'wall';
+        bottomWall.collisionMask = ['tank', 'bullet'];
+        bottomWall.visible = false; // Make invisible
+        bottomWall.destructible = false;
+        this.walls.push(bottomWall);
+        
+        // Left wall: from (100,500) to (110,102)
+        const leftWall = new Entity(100 - wallThickness/2, 102, wallThickness, 398); // height = 500-102 = 398
+        leftWall.collisionLayer = 'wall';
+        leftWall.collisionMask = ['tank', 'bullet'];
+        leftWall.visible = false; // Make invisible
+        leftWall.destructible = false;
+        this.walls.push(leftWall);
+        
+        // Add walls to collision system only (not render system since they're invisible)
+        this.walls.forEach(wall => {
+            this.collisionSystem.addEntity(wall);
+            // Don't add to renderSystem since walls are invisible
+        });
+    }
+
+    createCars() {
+        // Car positions - 4 columns with 6 cars each at exact coordinates
+        const carPositions = [
+            // Column 1: x=226/225, y from 177 to 424 (6 cars)
+            { x: 226, y: 177 },
+            { x: 226, y: 226 },
+            { x: 226, y: 275 },
+            { x: 226, y: 324 },
+            { x: 226, y: 375 },
+            { x: 225, y: 424 },
+            
+            // Column 2: x=358, y from 177 to 424 (6 cars)
+            { x: 358, y: 177 },
+            { x: 358, y: 226 },
+            { x: 358, y: 275 },
+            { x: 358, y: 324 },
+            { x: 358, y: 375 },
+            { x: 358, y: 424 },
+            
+            // Column 3: x=494/490, y from 177 to 424 (6 cars)
+            { x: 494, y: 177 },
+            { x: 494, y: 226 },
+            { x: 494, y: 275 },
+            { x: 494, y: 324 },
+            { x: 494, y: 375 },
+            { x: 490, y: 424 },
+            
+            // Column 4: x=623, y from 177 to 424 (6 cars)
+            { x: 623, y: 177 },
+            { x: 623, y: 226 },
+            { x: 623, y: 275 },
+            { x: 623, y: 324 },
+            { x: 623, y: 375 },
+            { x: 623, y: 424 }
+        ];
+        
+        // Create cars at each specified position
+        carPositions.forEach((pos, index) => {
+            // Make cars small to fit well (28x22 pixels)
+            const car = new Car(pos.x - 14, pos.y - 11, 28, 22);
+            
+            // Set sprite
+            car.sprite = this.assetLoader.getImage('car');
+            
+            this.cars.push(car);
+            this.renderSystem.addEntity(car);
+            this.collisionSystem.addEntity(car);
+        });
+        
+        console.log(`Created ${this.cars.length} destructible cars in 4 columns of 6 cars each`);
+    }
+
+    spawnEnemy() {
+        if (this.enemies.length >= this.maxEnemies) return;
+        
+        // Random spawn position at top of screen
+        const gameWidth = this.canvas.width;
+        const x = Math.random() * (gameWidth - 64) + 32;
+        const y = 50;
+        
+        const enemyTypes = ['basic', 'fast', 'heavy'];
+        const randomType = enemyTypes[Math.floor(Math.random() * enemyTypes.length)];
+        
+        const enemy = new Enemy(x, y, randomType);
+        
+        // Set sprite
+        enemy.spriteName = 'enemy1';
+        enemy.sprite = this.assetLoader.getImage('enemy1');
+        
+        // Set target to nearest player
+        if (this.players.length > 0) {
+            const nearestPlayer = this.findNearestPlayer(enemy.getCenter());
+            enemy.setTarget(nearestPlayer);
+        }
+        
+        this.enemies.push(enemy);
+        this.renderSystem.addEntity(enemy);
+        this.collisionSystem.addEntity(enemy);
+    }
+
+    findNearestPlayer(position) {
+        let nearest = null;
+        let minDistance = Infinity;
+        
+        this.players.forEach(player => {
+            if (player.alive && !player.respawning) {
+                const distance = position.distanceTo(player.getCenter());
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    nearest = player;
+                }
+            }
+        });
+        
+        return nearest;
+    }
+
+    setupSystems() {
+        // Clear collision system
+        this.collisionSystem = new CollisionSystem();
+        
+        // Add all entities to systems
+        [...this.players, ...this.enemies, ...this.walls, ...this.cars].forEach(entity => {
+            if (entity) {
+                this.collisionSystem.addEntity(entity);
+            }
+        });
+    }
+
+    gameLoop() {
+        if (!this.isRunning) return;
+        
+        const currentTime = performance.now();
+        this.deltaTime = (currentTime - this.lastFrameTime) / 1000;
+        this.lastFrameTime = currentTime;
+        
+        // Cap delta time to prevent large jumps
+        this.deltaTime = Math.min(this.deltaTime, 1/30);
+        
+        // Update game
+        this.update(this.deltaTime);
+        
+        // Update input system's previous key states for next frame
+        this.inputSystem.updatePreviousKeys();
+        
+        // Render game
+        this.render();
+        
+        // Continue loop
+        requestAnimationFrame(() => this.gameLoop());
+    }
+
+    update(deltaTime) {
+        // Always update input system to check for pause
+        this.inputSystem.update();
+        
+        // Handle pause input (works in any state)
+        if (this.inputSystem.isPausePressed()) {
+            this.togglePause();
+            return;
+        }
+        
+        // Handle debug toggle (works in any state)
+        if (this.inputSystem.isDebugTogglePressed()) {
+            this.debugSystem.toggle();
+            return;
+        }
+        
+        // Don't update game logic when paused
+        if (this.gameState !== 'playing') return;
+        
+        // Update game time
+        this.gameTime += deltaTime;
+        
+        // Update entities
+        this.updateEntities(deltaTime);
+        
+        // Handle firing
+        this.handleFiring();
+        
+        // Update collision system
+        this.collisionSystem.update();
+        
+        // Spawn enemies
+        this.updateEnemySpawning(deltaTime);
+        
+        // Check win/lose conditions
+        this.checkGameConditions();
+        
+        // Update UI
+        this.updateUI();
+        
+        // Update debug system
+        const allEntities = [...this.players, ...this.enemies, ...this.bullets, ...this.walls, ...this.cars, ...this.powerUps];
+        this.debugSystem.update(allEntities, this.renderSystem.camera);
+        
+        // Clean up dead entities
+        this.cleanup();
+    }
+
+    updateEntities(deltaTime) {
+        // Update players
+        this.players.forEach(player => {
+            if (player.alive) {
+                player.update(deltaTime);
+                
+                // Keep player in bounds
+                player.clampToScreen(this.canvas.width, this.canvas.height);
+            }
+        });
+        
+        // Update enemies
+        this.enemies.forEach(enemy => {
+            if (enemy.alive) {
+                enemy.update(deltaTime);
+                
+                // Update enemy target
+                const nearestPlayer = this.findNearestPlayer(enemy.getCenter());
+                enemy.setTarget(nearestPlayer);
+                
+                // Keep enemy in bounds
+                enemy.clampToScreen(this.canvas.width, this.canvas.height);
+            }
+        });
+        
+        // Update bullets
+        this.bullets.forEach(bullet => {
+            if (bullet.alive) {
+                bullet.update(deltaTime);
+                
+                // Remove bullets that are off screen or have traveled too far
+                if (bullet.isOffScreen(this.canvas.width, this.canvas.height) || 
+                    !bullet.alive || bullet.traveledDistance >= bullet.maxDistance) {
+                    bullet.destroy();
+                }
+            }
+        });
+        
+        // Update walls
+        this.walls.forEach(wall => {
+            if (wall.alive && wall.update) {
+                wall.update(deltaTime);
+            }
+        });
+        
+        // Update cars
+        this.cars.forEach(car => {
+            if (car.alive && car.update) {
+                car.update(deltaTime);
+            }
+        });
+    }
+
+    handleFiring() {
+        // Player firing
+        this.players.forEach(player => {
+            if (player.alive && !player.respawning) {
+                const bulletData = player.attemptFire();
+                if (bulletData) {
+                    this.createBullet(bulletData);
+                }
+            }
+        });
+        
+        // Enemy firing
+        this.enemies.forEach(enemy => {
+            if (enemy.alive) {
+                const bulletData = enemy.attemptFire();
+                if (bulletData) {
+                    this.createBullet(bulletData);
+                }
+            }
+        });
+    }
+
+    createBullet(bulletData) {
+        const bullet = new Bullet(
+            bulletData.position.x,
+            bulletData.position.y,
+            bulletData.direction,
+            bulletData.speed,
+            bulletData.damage,
+            bulletData.owner
+        );
+        
+        this.bullets.push(bullet);
+        this.renderSystem.addEntity(bullet);
+        this.collisionSystem.addEntity(bullet);
+        
+        // Play sound effect
+        // this.soundManager.playSound('shoot', 0.3);
+    }
+
+    updateEnemySpawning(deltaTime) {
+        this.enemySpawnTimer += deltaTime * 1000;
+        
+        // Spawn from predetermined positions if available
+        if (this.enemySpawnTimer >= this.enemySpawnDelay && 
+            this.enemies.length < this.maxEnemies &&
+            this.enemySpawnPoints && 
+            this.currentSpawnIndex < this.enemySpawnPoints.length) {
+            
+            const spawnPoint = this.enemySpawnPoints[this.currentSpawnIndex];
+            this.spawnEnemyAt(spawnPoint.x, spawnPoint.y);
+            this.currentSpawnIndex++;
+            this.enemySpawnTimer = 0;
+        }
+    }
+
+    checkGameConditions() {
+        // Check if all players are dead
+        const alivePlayers = this.players.filter(player => !player.isGameOver());
+        if (alivePlayers.length === 0) {
+            this.gameOver('All Players Defeated');
+            return;
+        }
+        
+        // Check if all enemies are defeated (simple win condition)
+        const aliveEnemies = this.enemies.filter(enemy => enemy.alive);
+        if (aliveEnemies.length === 0 && this.gameTime > 10) { // Wait at least 10 seconds
+            this.nextStage();
+        }
+    }
+
+    render() {
+        // Fixed camera - no movement, show full stage
+        this.renderSystem.camera.x = 0;
+        this.renderSystem.camera.y = 0;
+        
+        // Render everything
+        this.renderSystem.render();
+        
+        // Render debug overlay
+        const allEntities = [...this.players, ...this.enemies, ...this.bullets, ...this.walls, ...this.cars, ...this.powerUps];
+        this.debugSystem.render(this.ctx, allEntities, this.renderSystem.camera);
+        
+        // Render game state specific overlays
+        if (this.gameState === 'paused') {
+            this.renderPauseScreen();
+        } else if (this.gameState === 'gameOver') {
+            this.renderGameOverScreen();
+        }
+    }
+
+    renderLoadingScreen(progress) {
+        this.ctx.fillStyle = '#000000';
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.font = '24px Arial';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('Loading...', this.canvas.width / 2, this.canvas.height / 2 - 50);
+        
+        // Progress bar
+        const barWidth = 300;
+        const barHeight = 20;
+        const barX = (this.canvas.width - barWidth) / 2;
+        const barY = this.canvas.height / 2;
+        
+        this.ctx.strokeStyle = '#ffffff';
+        this.ctx.strokeRect(barX, barY, barWidth, barHeight);
+        
+        this.ctx.fillStyle = '#00ff00';
+        this.ctx.fillRect(barX, barY, (progress / 100) * barWidth, barHeight);
+        
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.font = '16px Arial';
+        this.ctx.fillText(`${Math.round(progress)}%`, this.canvas.width / 2, barY + barHeight + 30);
+    }
+
+    renderPauseScreen() {
+        this.ctx.save();
+        this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.font = '48px Arial';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('PAUSED', this.canvas.width / 2, this.canvas.height / 2);
+        
+        this.ctx.font = '20px Arial';
+        this.ctx.fillText('Press P or Escape to resume', this.canvas.width / 2, this.canvas.height / 2 + 50);
+        this.ctx.restore();
+    }
+
+    renderGameOverScreen() {
+        this.ctx.save();
+        this.ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        
+        this.ctx.fillStyle = '#ff0000';
+        this.ctx.font = '48px Arial';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('GAME OVER', this.canvas.width / 2, this.canvas.height / 2 - 50);
+        
+        this.ctx.fillStyle = '#ffffff';
+        this.ctx.font = '20px Arial';
+        this.ctx.fillText(`Final Score: ${this.gameScore}`, this.canvas.width / 2, this.canvas.height / 2 + 20);
+        this.ctx.fillText('Press Space to restart', this.canvas.width / 2, this.canvas.height / 2 + 60);
+        this.ctx.restore();
+    }
+
+    updateUI() {
+        // Update lives display
+        const livesElement = document.getElementById('lives');
+        if (livesElement && this.players[0]) {
+            livesElement.textContent = this.players[0].lives;
+        }
+        
+        // Update score display
+        const scoreElement = document.getElementById('score');
+        if (scoreElement && this.players[0]) {
+            scoreElement.textContent = this.players[0].score;
+        }
+        
+        // Update stage display
+        const stageElement = document.getElementById('stage');
+        if (stageElement) {
+            stageElement.textContent = this.stage;
+        }
+        
+        // Update enemy count
+        const enemyCountElement = document.getElementById('enemyCount');
+        if (enemyCountElement) {
+            const aliveEnemies = this.enemies.filter(enemy => enemy.alive);
+            enemyCountElement.textContent = aliveEnemies.length;
+        }
+    }
+
+    cleanup() {
+        // Remove dead entities and update systems
+        const prevBulletCount = this.bullets.length;
+        
+        // Filter out dead entities
+        this.players = this.players.filter(player => !player.isGameOver());
+        this.enemies = this.enemies.filter(enemy => {
+            if (!enemy.alive) {
+                this.collisionSystem.removeEntity(enemy);
+                this.renderSystem.removeEntity(enemy);
+                return false;
+            }
+            return true;
+        });
+        
+        this.bullets = this.bullets.filter(bullet => {
+            if (!bullet.alive) {
+                this.collisionSystem.removeEntity(bullet);
+                this.renderSystem.removeEntity(bullet);
+                return false;
+            }
+            return true;
+        });
+        
+        this.walls = this.walls.filter(wall => {
+            if (!wall.alive) {
+                this.collisionSystem.removeEntity(wall);
+                this.renderSystem.removeEntity(wall);
+                return false;
+            }
+            return true;
+        });
+        
+        this.cars = this.cars.filter(car => {
+            if (!car.alive) {
+                this.collisionSystem.removeEntity(car);
+                this.renderSystem.removeEntity(car);
+                return false;
+            }
+            return true;
+        });
+        
+        this.powerUps = this.powerUps.filter(powerUp => {
+            if (!powerUp.alive) {
+                this.collisionSystem.removeEntity(powerUp);
+                this.renderSystem.removeEntity(powerUp);
+                return false;
+            }
+            return true;
+        });
+        
+        // Debug: Log bullet cleanup
+        if (prevBulletCount !== this.bullets.length) {
+            console.log(`Cleaned up ${prevBulletCount - this.bullets.length} bullets, ${this.bullets.length} remaining`);
+        }
+        
+        // Clean up render system
+        this.renderSystem.cleanup();
+    }
+
+    // Game state management
+    togglePause() {
+        if (this.gameState === 'playing') {
+            this.gameState = 'paused';
+            console.log('Game paused');
+        } else if (this.gameState === 'paused') {
+            this.gameState = 'playing';
+            console.log('Game resumed');
+        }
+    }
+
+    gameOver(reason = 'Game Over') {
+        console.log('Game Over:', reason);
+        this.gameState = 'gameOver';
+        
+        // Calculate final score
+        this.gameScore = this.players.reduce((total, player) => total + player.score, 0);
+        
+        // Update final score display
+        const finalScoreElement = document.getElementById('finalScore');
+        if (finalScoreElement) {
+            finalScoreElement.textContent = this.gameScore;
+        }
+        
+        // Show game over screen
+        const gameOverScreen = document.getElementById('gameOverScreen');
+        if (gameOverScreen) {
+            gameOverScreen.classList.remove('hidden');
+        }
+        
+        // Set up restart button
+        const restartBtn = document.getElementById('restartBtn');
+        if (restartBtn) {
+            restartBtn.onclick = () => this.restartGame();
+        }
+    }
+
+    restartGame() {
+        // Hide game over screen
+        const gameOverScreen = document.getElementById('gameOverScreen');
+        if (gameOverScreen) {
+            gameOverScreen.classList.add('hidden');
+        }
+        
+        // Reset game state
+        this.gameState = 'playing';
+        this.resetGame();
+    }
+
+    nextStage() {
+        this.stage++;
+        console.log(`Advancing to stage ${this.stage}`);
+        
+        // Increase difficulty
+        this.maxEnemies = Math.min(6, 2 + this.stage);
+        this.enemySpawnDelay = Math.max(2000, 5000 - (this.stage * 500));
+        
+        // Clear remaining enemies
+        this.enemies.forEach(enemy => enemy.destroy());
+        
+        // Clear bullets
+        this.bullets.forEach(bullet => bullet.destroy());
+        
+        // Add some walls
+        this.createWalls();
+        
+        // Spawn new enemies
+        this.enemySpawnTimer = 0;
+    }
+
+    // Effect system
+    createEffect(type, position, options = {}) {
+        return this.renderSystem.createEffect(type, position, options);
+    }
+
+    addScreenShake(intensity, duration) {
+        this.renderSystem.addScreenShake(intensity, duration);
+    }
+
+    // Event handlers
+    onBaseDestroyed(base) {
+        console.log('Base destroyed!');
+        // Game over will be handled in checkGameConditions
+    }
+
+    // Debug methods
+    toggleDebug() {
+        this.renderSystem.toggleDebug();
+        window.DEBUG_MODE = this.renderSystem.showDebug;
+    }
+}
